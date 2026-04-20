@@ -5,161 +5,149 @@ import requests
 import random
 from threading import Thread
 import time
+import pandas as pd
 
-# Необходимые библиотеки: pyTelegramBotAPI, requests, streamlit
+# Библиотеки: pyTelegramBotAPI, requests, streamlit, pandas
 
-# --- CONFIGURATION ---
+# --- ИНИЦИАЛИЗАЦИЯ ---
 try:
-    # Берем токены из секретов Streamlit
-    TELEGRAM_TOKEN = st.secrets["TELEGRAM_TOKEN"]
-    PEXELS_API_KEY = st.secrets["PEXELS_API_KEY"]
+    TOKEN = st.secrets["TELEGRAM_TOKEN"]
+    PEXELS_KEY = st.secrets["PEXELS_API_KEY"]
 except Exception as e:
-    st.error("Ошибка: Проверьте TELEGRAM_TOKEN и PEXELS_API_KEY в Secrets!")
+    st.error("Настройте SECRETS в Streamlit (TELEGRAM_TOKEN и PEXELS_API_KEY)!")
     st.stop()
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
+bot = telebot.TeleBot(TOKEN)
 
-# --- MESSENGER-X CHARACTER ENGINE ---
-# Имитация работы с платформой messengerx.io
+# Глобальное хранилище логов для Streamlit
+if 'bot_logs' not in st.session_state:
+    st.session_state.bot_logs = []
 
-class StockCharacter:
-    """
-    Класс персонажа в стиле MessengerX. 
-    Отвечает за 'личность' бота и обработку команд.
-    """
+# --- КЛАСС ПЕРСОНАЖА (MESSENGER-X STYLE) ---
+
+class MediaScout:
     def __init__(self):
-        self.name = "MediaScout"
-        self.version = "1.0.4"
-        self.instruction = "Я твой ассистент по поиску визуального контента. Использую Pexels API."
+        self.headers = {"Authorization": PEXELS_KEY}
 
-    def get_headers(self):
-        """Заголовки для внешних API (имитация MessengerX Auth)"""
-        return {
-            "Authorization": PEXELS_API_KEY,
-            "Content-Type": "application/json"
-        }
-
-    def search_media(self, query, media_type="photo"):
-        """Метод поиска, адаптированный под логику SDK."""
-        page = random.randint(1, 10)
-        if media_type == "photo":
-            url = f"https://api.pexels.com/v1/search?query={query}&per_page=15&page={page}"
-        else:
-            url = f"https://api.pexels.com/videos/search?query={query}&per_page=15&page={page}"
-            
+    def find_video(self, query):
+        """Поиск видео с защитой от пустых ответов."""
+        page = random.randint(1, 20)
+        url = f"https://api.pexels.com/videos/search?query={query}&per_page=10&page={page}"
         try:
-            response = requests.get(url, headers=self.get_headers(), timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                items = data.get('photos' if media_type == "photo" else 'videos')
-                return random.choice(items) if items else None
+            r = requests.get(url, headers=self.headers, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                videos = data.get('videos', [])
+                if videos:
+                    v_item = random.choice(videos)
+                    # Выбираем HD качество (обычно второй или третий файл в списке)
+                    # Фильтруем, чтобы найти ссылку, которая заканчивается на .mp4
+                    for f in v_item['video_files']:
+                        if f['width'] and 720 <= f['width'] <= 1920:
+                            return f['link']
+                    return v_item['video_files'][0]['link']
             return None
         except Exception as e:
-            st.error(f"Ошибка поиска: {e}")
+            return f"Error: {e}"
+
+    def find_photo(self, query):
+        """Поиск фото."""
+        page = random.randint(1, 20)
+        url = f"https://api.pexels.com/v1/search?query={query}&per_page=10&page={page}"
+        try:
+            r = requests.get(url, headers=self.headers, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                photos = data.get('photos', [])
+                if photos:
+                    return random.choice(photos)['src']['large2x']
+            return None
+        except:
             return None
 
-# Инициализируем нашего персонажа
-scout = StockCharacter()
+scout = MediaScout()
 
-# --- TELEGRAM BOT HANDLERS ---
+# --- ОБРАБОТКА ТЕЛЕГРАМ ---
 
-@bot.message_handler(commands=['start', 'help'])
-def send_welcome(message):
-    """Приветствие в стиле диалогового ИИ."""
+@bot.message_handler(commands=['start'])
+def start_message(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("📸 Найти Фото", "📹 Найти Видео")
-    
-    welcome_text = (
-        f"🤖 Привет! Я — **{scout.name}** (v{scout.version}).\n\n"
-        f"{scout.instruction}\n\n"
-        "Просто напиши, что ты хочешь найти, или нажми на кнопку ниже."
+    markup.add("🔍 Поиск медиа")
+    bot.send_message(
+        message.chat.id, 
+        "🤖 **MediaScout v1.1** на связи.\nНапиши тему (на англ.), и я подберу контент!", 
+        parse_mode="Markdown", 
+        reply_markup=markup
     )
-    bot.send_message(message.chat.id, welcome_text, parse_mode="Markdown", reply_markup=markup)
 
-@bot.message_handler(func=lambda message: True)
-def handle_dialogue(message):
-    """Основной цикл обработки сообщений (MessengerX Dispatcher)."""
-    text = message.text
-    chat_id = message.chat.id
-
-    if text == "📸 Найти Фото":
-        msg = bot.send_message(chat_id, "🔍 Введи тему для фото (на английском):")
-        bot.register_next_step_handler(msg, process_photo)
-    elif text == "📹 Найти Видео":
-        msg = bot.send_message(chat_id, "🔍 Введи тему для видео (на английском):")
-        bot.register_next_step_handler(msg, process_video)
-    else:
-        # Если пользователь просто пишет текст, предлагаем быстрые действия
-        markup = types.InlineKeyboardMarkup()
-        markup.add(
-            types.InlineKeyboardButton("🖼 Искать Фото", callback_data=f"img:{text}"),
-            types.InlineKeyboardButton("🎬 Искать Видео", callback_data=f"vid:{text}")
-        )
-        bot.send_message(chat_id, f"Понял запрос: **{text}**. Что именно найти?", 
-                         parse_mode="Markdown", reply_markup=markup)
-
-def process_photo(message):
+@bot.message_handler(func=lambda m: True)
+def get_query(message):
     query = message.text
-    bot.send_chat_action(message.chat.id, 'upload_photo')
-    res = scout.search_media(query, "photo")
-    if res:
-        bot.send_photo(message.chat.id, res['src']['large2x'], caption=f"🖼 Фото по запросу: {query}")
-    else:
-        bot.send_message(message.chat.id, "😔 Ничего не нашел. Попробуй другое слово.")
+    if query == "🔍 Поиск медиа":
+        bot.send_message(message.chat.id, "Жду твое ключевое слово...")
+        return
 
-def process_video(message):
-    query = message.text
-    bot.send_chat_action(message.chat.id, 'upload_video')
-    res = scout.search_media(query, "video")
-    if res:
-        # Выбираем HD качество для стабильности
-        video_url = res['video_files'][0]['link']
-        bot.send_video(message.chat.id, video_url, caption=f"📹 Видео по запросу: {query}", supports_streaming=True)
-    else:
-        bot.send_message(message.chat.id, "😔 Видео не найдено.")
+    # Создаем инлайн-кнопки с уникальным callback_data
+    markup = types.InlineKeyboardMarkup()
+    btn_img = types.InlineKeyboardButton("🖼 Фото", callback_data=f"img|{query}")
+    btn_vid = types.InlineKeyboardButton("🎬 Видео", callback_data=f"vid|{query}")
+    markup.add(btn_img, btn_vid)
+    
+    bot.send_message(message.chat.id, f"🎯 Запрос принят: **{query}**\nЧто прислать?", 
+                     parse_mode="Markdown", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: True)
-def callback_inline(call):
-    """Обработка инлайн-кнопок."""
-    action, query = call.data.split(":")
-    bot.answer_callback_query(call.id, "Выполняю поиск...")
+def handle_query(call):
+    # Разделяем по символу '|', чтобы не было конфликтов с ":" в тексте
+    data_parts = call.data.split("|")
+    action = data_parts[0]
+    query = data_parts[1]
+    
+    bot.answer_callback_query(call.id, "Выполняю... 🚀")
     
     if action == "img":
-        res = scout.search_media(query, "photo")
-        if res: bot.send_photo(call.message.chat.id, res['src']['large2x'])
+        bot.send_chat_action(call.message.chat.id, 'upload_photo')
+        url = scout.find_photo(query)
+        if url:
+            bot.send_photo(call.message.chat.id, url, caption=f"✅ Фото по запросу: {query}")
+            st.session_state.bot_logs.append({"Тип": "Фото", "Запрос": query, "Статус": "Ок"})
+        else:
+            bot.send_message(call.message.chat.id, "❌ Фото не найдено.")
+            
     elif action == "vid":
-        res = scout.search_media(query, "video")
-        if res: 
-            video_url = res['video_files'][0]['link']
-            bot.send_video(call.message.chat.id, video_url, supports_streaming=True)
+        bot.send_chat_action(call.message.chat.id, 'upload_video')
+        video_url = scout.find_video(query)
+        
+        if video_url and not video_url.startswith("Error"):
+            try:
+                bot.send_video(call.message.chat.id, video_url, caption=f"✅ Видео: {query}", supports_streaming=True)
+                st.session_state.bot_logs.append({"Тип": "Видео", "Запрос": query, "Статус": "Ок"})
+            except Exception as e:
+                bot.send_message(call.message.chat.id, "⚠️ Ошибка отправки: файл слишком тяжелый.")
+                st.session_state.bot_logs.append({"Тип": "Видео", "Запрос": query, "Статус": "Fail"})
+        else:
+            bot.send_message(call.message.chat.id, "❌ Видео не найдено или произошла ошибка API.")
 
-# --- STREAMLIT DASHBOARD ---
-
-def run_bot():
-    """Запуск бота в фоновом режиме."""
+# --- ЗАПУСК ПОТОКА ---
+def start_bot():
     bot.remove_webhook()
     bot.polling(none_stop=True)
 
-st.set_page_config(page_title="MessengerX Bot Hub", page_icon="🤖")
+# --- ИНТЕРФЕЙС STREAMLIT ---
+st.set_page_config(page_title="MediaScout Console", layout="wide")
+st.title("🛰 MediaScout Admin Dashboard")
 
-st.title("🤖 MessengerX Style Media Hub")
-st.write("Этот интерфейс имитирует панель управления ИИ-персонажем.")
+if "thread_started" not in st.session_state:
+    t = Thread(target=start_bot, daemon=True)
+    t.start()
+    st.session_state.thread_started = True
 
-if "bot_thread" not in st.session_state:
-    thread = Thread(target=run_bot, daemon=True)
-    thread.start()
-    st.session_state.bot_thread = True
-    st.success("Бот 'MediaScout' успешно запущен и готов к работе!")
+# Панель логов
+st.subheader("Логи активности")
+if st.session_state.bot_logs:
+    st.table(pd.DataFrame(st.session_state.bot_logs).iloc[::-1])
+else:
+    st.info("Бот запущен. Ожидаем действий пользователей в Telegram.")
 
-# Админ-функции
-st.divider()
-st.subheader("Настройки персонажа")
-st.text_input("Имя бота", value=scout.name, disabled=True)
-st.text_area("Инструкция (System Prompt)", value=scout.instruction, disabled=True)
-
-st.sidebar.title("Управление")
-if st.sidebar.button("Перезагрузить страницу"):
+if st.button("Обновить"):
     st.rerun()
-
-st.sidebar.divider()
-st.sidebar.info("Используется логика MessengerX для управления диалогами.")

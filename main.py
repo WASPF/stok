@@ -4,150 +4,133 @@ from telebot import types
 import requests
 import random
 from threading import Thread
+import replicate
 import time
 import pandas as pd
 
-# Библиотеки: pyTelegramBotAPI, requests, streamlit, pandas
+# Библиотеки для requirements.txt: 
+# pyTelegramBotAPI, requests, streamlit, replicate, pandas
 
-# --- ИНИЦИАЛИЗАЦИЯ ---
+# --- ИНИЦИАЛИЗАЦИЯ ИЗ SECRETS ---
 try:
     TOKEN = st.secrets["TELEGRAM_TOKEN"]
     PEXELS_KEY = st.secrets["PEXELS_API_KEY"]
+    REPLICATE_TOKEN = st.secrets["REPLICATE_API_TOKEN"]
+    
+    # Настройка клиента нейросети
+    replicate_client = replicate.Client(api_token=REPLICATE_TOKEN)
 except Exception as e:
-    st.error("Настройте SECRETS в Streamlit (TELEGRAM_TOKEN и PEXELS_API_KEY)!")
+    st.error("Настройте SECRETS: TELEGRAM_TOKEN, PEXELS_API_KEY, REPLICATE_API_TOKEN")
     st.stop()
 
 bot = telebot.TeleBot(TOKEN)
 
-# Глобальное хранилище логов для Streamlit
-if 'bot_logs' not in st.session_state:
-    st.session_state.bot_logs = []
+if 'logs' not in st.session_state:
+    st.session_state.logs = []
 
-# --- КЛАСС ПЕРСОНАЖА (MESSENGER-X STYLE) ---
+# --- MEDIA & AI ENGINE ---
 
-class MediaScout:
-    def __init__(self):
-        self.headers = {"Authorization": PEXELS_KEY}
-
-    def find_video(self, query):
-        """Поиск видео с защитой от пустых ответов."""
-        page = random.randint(1, 20)
-        url = f"https://api.pexels.com/videos/search?query={query}&per_page=10&page={page}"
+class AICreator:
+    @staticmethod
+    def search_pexels(query, m_type="video"):
+        """Поиск готового контента."""
+        headers = {"Authorization": PEXELS_KEY}
+        url = f"https://api.pexels.com/videos/search?query={query}&per_page=5"
         try:
-            r = requests.get(url, headers=self.headers, timeout=10)
-            if r.status_code == 200:
-                data = r.json()
-                videos = data.get('videos', [])
-                if videos:
-                    v_item = random.choice(videos)
-                    # Выбираем HD качество (обычно второй или третий файл в списке)
-                    # Фильтруем, чтобы найти ссылку, которая заканчивается на .mp4
-                    for f in v_item['video_files']:
-                        if f['width'] and 720 <= f['width'] <= 1920:
-                            return f['link']
-                    return v_item['video_files'][0]['link']
-            return None
+            r = requests.get(url, headers=headers, timeout=10).json()
+            vids = r.get('videos', [])
+            return vids[0]['video_files'][0]['link'] if vids else None
+        except: return None
+
+    @staticmethod
+    def generate_video_ai(prompt):
+        """Генерация видео через Replicate (нейросеть ZeroScope)."""
+        try:
+            # Используем модель ZeroScope для быстрой генерации
+            output = replicate.run(
+                "anotherjesse/zeroscope-v2-xl:9f742d46474161b405b5f058cf57028170e30c416e04439c74077797c774304b",
+                input={
+                    "prompt": prompt,
+                    "num_frames": 24,
+                    "fps": 8,
+                    "width": 576,
+                    "height": 320
+                }
+            )
+            # Модель возвращает список ссылок, берем первую
+            return output[0] if output else None
         except Exception as e:
-            return f"Error: {e}"
+            return f"Error: {str(e)}"
 
-    def find_photo(self, query):
-        """Поиск фото."""
-        page = random.randint(1, 20)
-        url = f"https://api.pexels.com/v1/search?query={query}&per_page=10&page={page}"
-        try:
-            r = requests.get(url, headers=self.headers, timeout=10)
-            if r.status_code == 200:
-                data = r.json()
-                photos = data.get('photos', [])
-                if photos:
-                    return random.choice(photos)['src']['large2x']
-            return None
-        except:
-            return None
-
-scout = MediaScout()
-
-# --- ОБРАБОТКА ТЕЛЕГРАМ ---
+# --- BOT HANDLERS ---
 
 @bot.message_handler(commands=['start'])
-def start_message(message):
+def start(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("🔍 Поиск медиа")
-    bot.send_message(
-        message.chat.id, 
-        "🤖 **MediaScout v1.1** на связи.\nНапиши тему (на англ.), и я подберу контент!", 
-        parse_mode="Markdown", 
-        reply_markup=markup
-    )
+    markup.add("🔎 Поиск", "🤖 Генерация ИИ")
+    bot.send_message(message.chat.id, "🚀 **MediaScout AI** активен!\nЯ могу найти видео или СГЕНЕРИРОВАТЬ его сам.", 
+                     parse_mode="Markdown", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: True)
-def get_query(message):
+def handle_text(message):
     query = message.text
-    if query == "🔍 Поиск медиа":
-        bot.send_message(message.chat.id, "Жду твое ключевое слово...")
+    if query == "🔎 Поиск":
+        bot.reply_to(message, "Что найти на стоках?")
+        return
+    if query == "🤖 Генерация ИИ":
+        bot.reply_to(message, "Опиши видео, которое мне создать (на англ.)?")
         return
 
-    # Создаем инлайн-кнопки с уникальным callback_data
     markup = types.InlineKeyboardMarkup()
-    btn_img = types.InlineKeyboardButton("🖼 Фото", callback_data=f"img|{query}")
-    btn_vid = types.InlineKeyboardButton("🎬 Видео", callback_data=f"vid|{query}")
-    markup.add(btn_img, btn_vid)
-    
-    bot.send_message(message.chat.id, f"🎯 Запрос принят: **{query}**\nЧто прислать?", 
+    markup.add(
+        types.InlineKeyboardButton("📦 Найти на Pexels", callback_data=f"find:{query}"),
+        types.InlineKeyboardButton("🧠 Сгенерировать ИИ", callback_data=f"gen:{query}")
+    )
+    bot.send_message(message.chat.id, f"Выбран запрос: **{query}**", 
                      parse_mode="Markdown", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: True)
-def handle_query(call):
-    # Разделяем по символу '|', чтобы не было конфликтов с ":" в тексте
-    data_parts = call.data.split("|")
-    action = data_parts[0]
-    query = data_parts[1]
-    
-    bot.answer_callback_query(call.id, "Выполняю... 🚀")
-    
-    if action == "img":
-        bot.send_chat_action(call.message.chat.id, 'upload_photo')
-        url = scout.find_photo(query)
-        if url:
-            bot.send_photo(call.message.chat.id, url, caption=f"✅ Фото по запросу: {query}")
-            st.session_state.bot_logs.append({"Тип": "Фото", "Запрос": query, "Статус": "Ок"})
-        else:
-            bot.send_message(call.message.chat.id, "❌ Фото не найдено.")
-            
-    elif action == "vid":
-        bot.send_chat_action(call.message.chat.id, 'upload_video')
-        video_url = scout.find_video(query)
-        
-        if video_url and not video_url.startswith("Error"):
-            try:
-                bot.send_video(call.message.chat.id, video_url, caption=f"✅ Видео: {query}", supports_streaming=True)
-                st.session_state.bot_logs.append({"Тип": "Видео", "Запрос": query, "Статус": "Ок"})
-            except Exception as e:
-                bot.send_message(call.message.chat.id, "⚠️ Ошибка отправки: файл слишком тяжелый.")
-                st.session_state.bot_logs.append({"Тип": "Видео", "Запрос": query, "Статус": "Fail"})
-        else:
-            bot.send_message(call.message.chat.id, "❌ Видео не найдено или произошла ошибка API.")
+def callback_logic(call):
+    action, query = call.data.split(":", 1)
+    chat_id = call.message.chat.id
+    bot.answer_callback_query(call.id)
 
-# --- ЗАПУСК ПОТОКА ---
-def start_bot():
+    if action == "find":
+        bot.send_message(chat_id, "🔍 Ищу на стоках...")
+        url = AICreator.search_pexels(query)
+        if url:
+            bot.send_video(chat_id, url, caption=f"✅ Найдено на Pexels: {query}")
+        else:
+            bot.send_message(chat_id, "❌ Ничего не найдено.")
+
+    elif action == "gen":
+        bot.send_message(chat_id, "🧪 Нейросеть начала магию... Это займет 30-60 секунд. Ждите!")
+        bot.send_chat_action(chat_id, 'record_video')
+        
+        video_url = AICreator.generate_video_ai(query)
+        
+        if video_url and not str(video_url).startswith("Error"):
+            bot.send_video(chat_id, video_url, caption=f"🔥 Сгенерировано ИИ: {query}")
+            st.session_state.logs.append({"Запрос": query, "Тип": "Генерация", "Результат": "Успех"})
+        else:
+            bot.send_message(chat_id, f"⚠️ Ошибка генерации. Возможно, лимит исчерпан или запрос заблокирован.")
+            st.session_state.logs.append({"Запрос": query, "Тип": "Генерация", "Результат": "Ошибка"})
+
+# --- BACKGROUND RUN ---
+def run_bot():
     bot.remove_webhook()
     bot.polling(none_stop=True)
 
-# --- ИНТЕРФЕЙС STREAMLIT ---
-st.set_page_config(page_title="MediaScout Console", layout="wide")
-st.title("🛰 MediaScout Admin Dashboard")
+# --- STREAMLIT DASHBOARD ---
+st.title("🛰 AI Video Hub Dashboard")
+if "active" not in st.session_state:
+    Thread(target=run_bot, daemon=True).start()
+    st.session_state.active = True
 
-if "thread_started" not in st.session_state:
-    t = Thread(target=start_bot, daemon=True)
-    t.start()
-    st.session_state.thread_started = True
-
-# Панель логов
-st.subheader("Логи активности")
-if st.session_state.bot_logs:
-    st.table(pd.DataFrame(st.session_state.bot_logs).iloc[::-1])
+st.subheader("Мониторинг нейросети")
+if st.session_state.logs:
+    st.table(pd.DataFrame(st.session_state.logs))
 else:
-    st.info("Бот запущен. Ожидаем действий пользователей в Telegram.")
+    st.info("Бот ожидает запросов на генерацию...")
 
-if st.button("Обновить"):
-    st.rerun()
+st.sidebar.write(f"API Token: `...{REPLICATE_TOKEN[-5:]}`")

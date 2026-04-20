@@ -8,129 +8,123 @@ import replicate
 import time
 import pandas as pd
 
-# Библиотеки для requirements.txt: 
-# pyTelegramBotAPI, requests, streamlit, replicate, pandas
+# requirements.txt: pyTelegramBotAPI, requests, streamlit, replicate, pandas
 
-# --- ИНИЦИАЛИЗАЦИЯ ИЗ SECRETS ---
+# --- ИНИЦИАЛИЗАЦИЯ ---
 try:
     TOKEN = st.secrets["TELEGRAM_TOKEN"]
     PEXELS_KEY = st.secrets["PEXELS_API_KEY"]
     REPLICATE_TOKEN = st.secrets["REPLICATE_API_TOKEN"]
-    
-    # Настройка клиента нейросети
-    replicate_client = replicate.Client(api_token=REPLICATE_TOKEN)
 except Exception as e:
-    st.error("Настройте SECRETS: TELEGRAM_TOKEN, PEXELS_API_KEY, REPLICATE_API_TOKEN")
+    st.error("Настройте SECRETS в Streamlit Cloud!")
     st.stop()
 
 bot = telebot.TeleBot(TOKEN)
 
-if 'logs' not in st.session_state:
-    st.session_state.logs = []
+if 'history' not in st.session_state:
+    st.session_state.history = []
 
-# --- MEDIA & AI ENGINE ---
+# --- MEDIA ENGINE ---
 
-class AICreator:
+class AIStudio:
     @staticmethod
-    def search_pexels(query, m_type="video"):
-        """Поиск готового контента."""
+    def search_pexels(query):
         headers = {"Authorization": PEXELS_KEY}
         url = f"https://api.pexels.com/videos/search?query={query}&per_page=5"
         try:
             r = requests.get(url, headers=headers, timeout=10).json()
-            vids = r.get('videos', [])
-            return vids[0]['video_files'][0]['link'] if vids else None
+            videos = r.get('videos', [])
+            return videos[0]['video_files'][0]['link'] if videos else None
         except: return None
 
     @staticmethod
-    def generate_video_ai(prompt):
-        """Генерация видео через Replicate (нейросеть ZeroScope)."""
+    def generate_video(prompt):
+        """Генерация через стабильную модель Stable Video Diffusion."""
         try:
-            # Используем модель ZeroScope для быстрой генерации
+            # Устанавливаем токен явно в окружение
+            import os
+            os.environ["REPLICATE_API_TOKEN"] = REPLICATE_TOKEN
+            
+            # Попробуем модель zeroscope (она быстрее для тестов)
+            # Если она не сработает, в консоли Streamlit будет видна точная ошибка
             output = replicate.run(
                 "anotherjesse/zeroscope-v2-xl:9f742d46474161b405b5f058cf57028170e30c416e04439c74077797c774304b",
                 input={
                     "prompt": prompt,
-                    "num_frames": 24,
+                    "num_frames": 16,
                     "fps": 8,
                     "width": 576,
                     "height": 320
                 }
             )
-            # Модель возвращает список ссылок, берем первую
-            return output[0] if output else None
+            # Результат — это список, берем первый элемент
+            if isinstance(output, list) and len(output) > 0:
+                return output[0]
+            return None
         except Exception as e:
+            # Выводим реальную ошибку в консоль Streamlit для диагностики
+            print(f"DEBUG AI ERROR: {e}")
             return f"Error: {str(e)}"
 
-# --- BOT HANDLERS ---
+# --- BOT LOGIC ---
 
 @bot.message_handler(commands=['start'])
-def start(message):
+def start_bot(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("🔎 Поиск", "🤖 Генерация ИИ")
-    bot.send_message(message.chat.id, "🚀 **MediaScout AI** активен!\nЯ могу найти видео или СГЕНЕРИРОВАТЬ его сам.", 
-                     parse_mode="Markdown", reply_markup=markup)
+    markup.add("🖼 Найти", "🧠 Создать ИИ")
+    bot.send_message(message.chat.id, "🤖 **MediaScout AI** готов к работе!", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: True)
-def handle_text(message):
+def router(message):
     query = message.text
-    if query == "🔎 Поиск":
-        bot.reply_to(message, "Что найти на стоках?")
-        return
-    if query == "🤖 Генерация ИИ":
-        bot.reply_to(message, "Опиши видео, которое мне создать (на англ.)?")
+    if query in ["🖼 Найти", "🧠 Создать ИИ"]:
+        bot.reply_to(message, "Напиши тему (на английском):")
         return
 
     markup = types.InlineKeyboardMarkup()
     markup.add(
-        types.InlineKeyboardButton("📦 Найти на Pexels", callback_data=f"find:{query}"),
-        types.InlineKeyboardButton("🧠 Сгенерировать ИИ", callback_data=f"gen:{query}")
+        types.InlineKeyboardButton("📦 Сток", callback_data=f"f:{query}"),
+        types.InlineKeyboardButton("🤖 ИИ Генерация", callback_data=f"g:{query}")
     )
-    bot.send_message(message.chat.id, f"Выбран запрос: **{query}**", 
-                     parse_mode="Markdown", reply_markup=markup)
+    bot.send_message(message.chat.id, f"Запрос: **{query}**", parse_mode="Markdown", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: True)
-def callback_logic(call):
+def callback_handler(call):
     action, query = call.data.split(":", 1)
     chat_id = call.message.chat.id
     bot.answer_callback_query(call.id)
 
-    if action == "find":
-        bot.send_message(chat_id, "🔍 Ищу на стоках...")
-        url = AICreator.search_pexels(query)
-        if url:
-            bot.send_video(chat_id, url, caption=f"✅ Найдено на Pexels: {query}")
-        else:
-            bot.send_message(chat_id, "❌ Ничего не найдено.")
+    if action == "f":
+        bot.send_message(chat_id, "🔎 Ищу видео...")
+        url = AIStudio.search_pexels(query)
+        if url: bot.send_video(chat_id, url)
+        else: bot.send_message(chat_id, "Ничего не найдено.")
 
-    elif action == "gen":
-        bot.send_message(chat_id, "🧪 Нейросеть начала магию... Это займет 30-60 секунд. Ждите!")
+    elif action == "g":
+        status_msg = bot.send_message(chat_id, "🧪 Нейросеть начала работу (40-60 сек)...")
         bot.send_chat_action(chat_id, 'record_video')
         
-        video_url = AICreator.generate_video_ai(query)
+        result = AIStudio.generate_video(query)
         
-        if video_url and not str(video_url).startswith("Error"):
-            bot.send_video(chat_id, video_url, caption=f"🔥 Сгенерировано ИИ: {query}")
-            st.session_state.logs.append({"Запрос": query, "Тип": "Генерация", "Результат": "Успех"})
+        if result and not str(result).startswith("Error"):
+            bot.send_video(chat_id, result, caption=f"🔥 Готово: {query}")
+            st.session_state.history.append({"Query": query, "Status": "Success"})
         else:
-            bot.send_message(chat_id, f"⚠️ Ошибка генерации. Возможно, лимит исчерпан или запрос заблокирован.")
-            st.session_state.logs.append({"Запрос": query, "Тип": "Генерация", "Результат": "Ошибка"})
+            error_text = "Лимит исчерпан или сервер перегружен."
+            if "401" in str(result): error_text = "Ошибка токена (Unauthorized)."
+            bot.edit_message_text(f"❌ Ошибка: {error_text}", chat_id, status_msg.message_id)
+            st.session_state.history.append({"Query": query, "Status": f"Fail: {result}"})
 
-# --- BACKGROUND RUN ---
-def run_bot():
+# --- RUN ---
+def bot_loop():
     bot.remove_webhook()
     bot.polling(none_stop=True)
 
-# --- STREAMLIT DASHBOARD ---
-st.title("🛰 AI Video Hub Dashboard")
-if "active" not in st.session_state:
-    Thread(target=run_bot, daemon=True).start()
-    st.session_state.active = True
+st.title("🛰 AI Video Hub")
+if "init" not in st.session_state:
+    Thread(target=bot_loop, daemon=True).start()
+    st.session_state.init = True
 
-st.subheader("Мониторинг нейросети")
-if st.session_state.logs:
-    st.table(pd.DataFrame(st.session_state.logs))
-else:
-    st.info("Бот ожидает запросов на генерацию...")
-
-st.sidebar.write(f"API Token: `...{REPLICATE_TOKEN[-5:]}`")
+if st.session_state.history:
+    st.write("### Логи ошибок и успехов")
+    st.dataframe(pd.DataFrame(st.session_state.history))

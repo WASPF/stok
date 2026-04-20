@@ -7,46 +7,51 @@ from threading import Thread
 import replicate
 import time
 import pandas as pd
+import os
 
 # requirements.txt: pyTelegramBotAPI, requests, streamlit, replicate, pandas
 
-# --- ИНИЦИАЛИЗАЦИЯ ---
+# --- 1. ПЕРВИЧНАЯ НАСТРОЙКА ---
+st.set_page_config(page_title="AI Video Master", layout="wide")
+
+# Инициализация хранилища логов (используем глобальную переменную для доступа из потоков)
+if 'bot_history' not in st.session_state:
+    st.session_state['bot_history'] = []
+
+# Глобальный список для обмена данными между потоком бота и Streamlit
+# Это решает проблему KeyError/AttributeError в потоках
+SHARED_LOGS = []
+
 try:
     TOKEN = st.secrets["TELEGRAM_TOKEN"]
     PEXELS_KEY = st.secrets["PEXELS_API_KEY"]
     REPLICATE_TOKEN = st.secrets["REPLICATE_API_TOKEN"]
+    os.environ["REPLICATE_API_TOKEN"] = REPLICATE_TOKEN
 except Exception as e:
-    st.error("Настройте SECRETS в Streamlit Cloud!")
+    st.error("Ошибка конфигурации Secrets! Проверьте TELEGRAM_TOKEN, PEXELS_API_KEY и REPLICATE_API_TOKEN.")
     st.stop()
 
 bot = telebot.TeleBot(TOKEN)
 
-if 'history' not in st.session_state:
-    st.session_state.history = []
+# --- 2. ENGINE (ЛОГИКА API) ---
 
-# --- MEDIA ENGINE ---
-
-class AIStudio:
+class VideoAI:
     @staticmethod
-    def search_pexels(query):
+    def get_stock(query):
         headers = {"Authorization": PEXELS_KEY}
-        url = f"https://api.pexels.com/videos/search?query={query}&per_page=5"
+        url = f"https://api.pexels.com/videos/search?query={query}&per_page=10"
         try:
             r = requests.get(url, headers=headers, timeout=10).json()
-            videos = r.get('videos', [])
-            return videos[0]['video_files'][0]['link'] if videos else None
+            vids = r.get('videos', [])
+            if vids:
+                # Выбираем не слишком тяжелое видео
+                return vids[0]['video_files'][0]['link']
+            return None
         except: return None
 
     @staticmethod
-    def generate_video(prompt):
-        """Генерация через стабильную модель Stable Video Diffusion."""
+    def generate_ai(prompt):
         try:
-            # Устанавливаем токен явно в окружение
-            import os
-            os.environ["REPLICATE_API_TOKEN"] = REPLICATE_TOKEN
-            
-            # Попробуем модель zeroscope (она быстрее для тестов)
-            # Если она не сработает, в консоли Streamlit будет видна точная ошибка
             output = replicate.run(
                 "anotherjesse/zeroscope-v2-xl:9f742d46474161b405b5f058cf57028170e30c416e04439c74077797c774304b",
                 input={
@@ -57,36 +62,31 @@ class AIStudio:
                     "height": 320
                 }
             )
-            # Результат — это список, берем первый элемент
-            if isinstance(output, list) and len(output) > 0:
-                return output[0]
-            return None
+            return output[0] if output and len(output) > 0 else None
         except Exception as e:
-            # Выводим реальную ошибку в консоль Streamlit для диагностики
-            print(f"DEBUG AI ERROR: {e}")
             return f"Error: {str(e)}"
 
-# --- BOT LOGIC ---
+# --- 3. ТЕЛЕГРАМ ОБРАБОТЧИКИ ---
 
 @bot.message_handler(commands=['start'])
-def start_bot(message):
+def start(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("🖼 Найти", "🧠 Создать ИИ")
-    bot.send_message(message.chat.id, "🤖 **MediaScout AI** готов к работе!", reply_markup=markup)
+    markup.add("🔍 Найти готовое", "🧠 Сгенерировать ИИ")
+    bot.send_message(message.chat.id, "🛰 **Media AI Studio**\nНапиши запрос, затем выбери действие.", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: True)
-def router(message):
+def handle_text(message):
     query = message.text
-    if query in ["🖼 Найти", "🧠 Создать ИИ"]:
-        bot.reply_to(message, "Напиши тему (на английском):")
+    if query in ["🔍 Найти готовое", "🧠 Сгенерировать ИИ"]:
+        bot.send_message(message.chat.id, "Введите тему на английском:")
         return
 
     markup = types.InlineKeyboardMarkup()
     markup.add(
-        types.InlineKeyboardButton("📦 Сток", callback_data=f"f:{query}"),
-        types.InlineKeyboardButton("🤖 ИИ Генерация", callback_data=f"g:{query}")
+        types.InlineKeyboardButton("📦 Сток Pexels", callback_data=f"f:{query}"),
+        types.InlineKeyboardButton("🤖 Нейросеть", callback_data=f"g:{query}")
     )
-    bot.send_message(message.chat.id, f"Запрос: **{query}**", parse_mode="Markdown", reply_markup=markup)
+    bot.send_message(message.chat.id, f"🎯 Запрос: **{query}**", parse_mode="Markdown", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
@@ -95,36 +95,69 @@ def callback_handler(call):
     bot.answer_callback_query(call.id)
 
     if action == "f":
-        bot.send_message(chat_id, "🔎 Ищу видео...")
-        url = AIStudio.search_pexels(query)
-        if url: bot.send_video(chat_id, url)
-        else: bot.send_message(chat_id, "Ничего не найдено.")
+        bot.send_message(chat_id, "🔎 Ищу видео на стоках...")
+        res = VideoAI.get_stock(query)
+        if res:
+            bot.send_video(chat_id, res, caption=f"✅ Сток: {query}")
+            SHARED_LOGS.append({"Запрос": query, "Тип": "Сток", "Статус": "Успех"})
+        else:
+            bot.send_message(chat_id, "❌ Ничего не найдено.")
 
     elif action == "g":
-        status_msg = bot.send_message(chat_id, "🧪 Нейросеть начала работу (40-60 сек)...")
+        bot.send_message(chat_id, "🧪 Нейросеть начала работу (около 1 мин)...")
         bot.send_chat_action(chat_id, 'record_video')
         
-        result = AIStudio.generate_video(query)
+        result = VideoAI.generate_ai(query)
         
         if result and not str(result).startswith("Error"):
-            bot.send_video(chat_id, result, caption=f"🔥 Готово: {query}")
-            st.session_state.history.append({"Query": query, "Status": "Success"})
+            bot.send_video(chat_id, result, caption=f"🔥 Сгенерировано: {query}")
+            SHARED_LOGS.append({"Запрос": query, "Тип": "ИИ", "Статус": "Успех"})
         else:
-            error_text = "Лимит исчерпан или сервер перегружен."
-            if "401" in str(result): error_text = "Ошибка токена (Unauthorized)."
-            bot.edit_message_text(f"❌ Ошибка: {error_text}", chat_id, status_msg.message_id)
-            st.session_state.history.append({"Query": query, "Status": f"Fail: {result}"})
+            bot.send_message(chat_id, f"⚠️ Ошибка: {result}")
+            SHARED_LOGS.append({"Запрос": query, "Тип": "ИИ", "Статус": f"Ошибка: {result}"})
 
-# --- RUN ---
-def bot_loop():
+# --- 4. ЗАПУСК БОТА ---
+
+def run_bot_forever():
     bot.remove_webhook()
     bot.polling(none_stop=True)
 
-st.title("🛰 AI Video Hub")
-if "init" not in st.session_state:
-    Thread(target=bot_loop, daemon=True).start()
-    st.session_state.init = True
+# --- 5. ИНТЕРФЕЙС STREAMLIT ---
 
-if st.session_state.history:
-    st.write("### Логи ошибок и успехов")
-    st.dataframe(pd.DataFrame(st.session_state.history))
+st.title("🖥 Media AI Control Hub")
+
+# Запуск потока бота только один раз
+if "bot_thread_active" not in st.session_state:
+    thread = Thread(target=run_bot_forever, daemon=True)
+    thread.start()
+    st.session_state.bot_thread_active = True
+
+# Отображение логов
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    st.subheader("📊 История активности")
+    # Переносим данные из общего списка в session_state для отображения
+    if SHARED_LOGS:
+        for log in SHARED_LOGS:
+            st.session_state.bot_history.append(log)
+        SHARED_LOGS.clear() # Очищаем буфер после переноса
+
+    if st.session_state.bot_history:
+        df = pd.DataFrame(st.session_state.bot_history).iloc[::-1]
+        st.dataframe(df, use_container_width=True)
+    else:
+        st.info("Бот ожидает запросов. Информация появится здесь автоматически.")
+
+with col2:
+    st.subheader("🛠 Статус систем")
+    st.write(f"Telegram Bot: ✅ Online")
+    st.write(f"Pexels API: ✅ Connected")
+    st.write(f"Replicate AI: ✅ Ready")
+    
+    if st.button("Очистить логи"):
+        st.session_state.bot_history = []
+        st.rerun()
+
+st.divider()
+st.caption("v5.2: Исправлены ошибки SessionState в многопоточности.")

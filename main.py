@@ -12,7 +12,7 @@ import os
 # requirements.txt: pyTelegramBotAPI, requests, streamlit, replicate, pandas
 
 # --- 1. ПЕРВИЧНАЯ НАСТРОЙКА ---
-st.set_page_config(page_title="AI Video Studio PRO", layout="wide")
+st.set_page_config(page_title="AI Video Studio 2026", layout="wide")
 
 if 'bot_history' not in st.session_state:
     st.session_state['bot_history'] = []
@@ -49,56 +49,44 @@ class VideoAI:
 
     @staticmethod
     def generate_ai(prompt):
-        """Генерация через Stable Video Diffusion (SVD)."""
+        """Генерация через стабильную модель AnimateDiff (Replicate)."""
         try:
-            # SVD-XT — это одна из самых стабильных моделей на Replicate сейчас
-            # Она создает видео из промпта/картинки
+            # Используем AnimateDiff — она сейчас самая надежная для текстовых промптов
             output = replicate.run(
-                "stability-ai/svd-xt:744971a3364f331776997089f30324707165768ba5b06067b8480370f113a778",
+                "lucataco/animate-diff:be11f4a83af975733448351da254923f773400a4e17743f0290130638e967b0b",
                 input={
-                    "width": 1024,
-                    "height": 576,
-                    "video_length": "14_frames_with_svd",
-                    "fps": 6,
-                    "motion_bucket_id": 127,
-                    "cond_aug": 0.02,
-                    "decoding_t": 7,
-                    # В этой модели промпт часто работает через генерацию начального кадра
-                    # Но для простоты используем прямую генерацию если модель поддерживает
+                    "prompt": prompt,
+                    "n_prompt": "bad quality, low resolution, blurry",
+                    "steps": 25,
+                    "guidance_scale": 7.5
                 }
             )
-            # Модель возвращает URL на готовое видео
-            return output if output else None
+            # Модель возвращает список ссылок, берем первую
+            if isinstance(output, list) and len(output) > 0:
+                return output[0]
+            return output # Если вернулась одна строка
         except Exception as e:
-            # Если SVD-XT не доступна, пробуем альтернативную быструю модель
-            try:
-                output = replicate.run(
-                    "lucataco/animate-diff:be11f4a83af975733448351da254923f773400a4e17743f0290130638e967b0b",
-                    input={"prompt": prompt}
-                )
-                return output[0] if output else None
-            except:
-                return f"Error: {str(e)}"
+            return f"Error: {str(e)}"
 
 # --- 3. ТЕЛЕГРАМ ОБРАБОТЧИКИ ---
 
 @bot.message_handler(commands=['start'])
 def start(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("🖼 Найти видео", "🧠 Создать видео (ИИ)")
-    bot.send_message(message.chat.id, "🤖 **Media AI Studio v6.0**\nЯ обновил модели генерации. Попробуй!", reply_markup=markup)
+    markup.add("🖼 Найти", "🧠 Создать (ИИ)")
+    bot.send_message(message.chat.id, "🤖 **Media AI Studio v6.1**\nОбновил нейросеть! Теперь ошибки 422 быть не должно.", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: True)
 def handle_text(message):
     query = message.text
-    if query in ["🖼 Найти видео", "🧠 Создать видео (ИИ)"]:
-        bot.send_message(message.chat.id, "Напиши тему на английском (например: *Neon city rain*):", parse_mode="Markdown")
+    if query in ["🖼 Найти", "🧠 Создать (ИИ)"]:
+        bot.send_message(message.chat.id, "Напиши тему на английском (напр. *Forest fire at night*):")
         return
 
     markup = types.InlineKeyboardMarkup()
     markup.add(
         types.InlineKeyboardButton("📦 Сток Pexels", callback_data=f"f:{query}"),
-        types.InlineKeyboardButton("🤖 Нейросеть (SVD)", callback_data=f"g:{query}")
+        types.InlineKeyboardButton("🤖 Нейросеть AI", callback_data=f"g:{query}")
     )
     bot.send_message(message.chat.id, f"🎯 Твой запрос: **{query}**", parse_mode="Markdown", reply_markup=markup)
 
@@ -118,14 +106,17 @@ def callback_handler(call):
             bot.send_message(chat_id, "❌ Ничего не найдено.")
 
     elif action == "g":
-        status_msg = bot.send_message(chat_id, "🚀 Нейросеть Stable Video Diffusion прогревается...\nЭто может занять до 2 минут.")
+        status_msg = bot.send_message(chat_id, "🚀 Нейросеть AnimateDiff запущена...\nЭто займет около 40-80 секунд.")
         bot.send_chat_action(chat_id, 'record_video')
         
         result = VideoAI.generate_ai(query)
         
         if result and not str(result).startswith("Error"):
-            bot.send_video(chat_id, result, caption=f"🔥 Готово! Модель: SVD-XT\nЗапрос: {query}")
-            SHARED_LOGS.append({"Запрос": query, "Тип": "ИИ", "Статус": "Успех"})
+            try:
+                bot.send_video(chat_id, result, caption=f"🔥 Готово! Модель: AnimateDiff\nЗапрос: {query}")
+                SHARED_LOGS.append({"Запрос": query, "Тип": "ИИ", "Статус": "Успех"})
+            except:
+                bot.send_message(chat_id, f"🔗 Видео готово, но файл слишком большой. Вот ссылка: {result}")
         else:
             bot.edit_message_text(f"⚠️ Ошибка API: {result}", chat_id, status_msg.message_id)
             SHARED_LOGS.append({"Запрос": query, "Тип": "ИИ", "Статус": f"Ошибка: {result}"})
@@ -138,7 +129,7 @@ def run_bot_forever():
 
 # --- 5. ИНТЕРФЕЙС STREAMLIT ---
 
-st.title("🖥 Media AI Control Hub v6.0")
+st.title("🖥 Media AI Master Dashboard")
 
 if "bot_thread_active" not in st.session_state:
     thread = Thread(target=run_bot_forever, daemon=True)
@@ -154,19 +145,18 @@ if SHARED_LOGS:
 col1, col2 = st.columns([2, 1])
 
 with col1:
-    st.subheader("📊 История запросов")
+    st.subheader("📊 Логи запросов")
     if st.session_state.bot_history:
         df = pd.DataFrame(st.session_state.bot_history).iloc[::-1]
         st.dataframe(df, use_container_width=True)
     else:
-        st.info("Ожидание активности...")
+        st.info("Активности пока нет.")
 
 with col2:
-    st.subheader("🛠 Мониторинг")
-    st.write("Статус: **Online** ✅")
-    st.write("Модель: **Stable Video Diffusion** 🧠")
+    st.subheader("🛠 Контроль")
+    st.success("Бот Онлайн ✅")
     if st.button("Очистить историю"):
         st.session_state.bot_history = []
         st.rerun()
 
-st.caption("v6.0: Исправлена ошибка 422 (обновлена модель генерации)")
+st.caption("v6.1: Исправлена ошибка 422. Переход на модель AnimateDiff.")

@@ -12,12 +12,11 @@ import os
 # requirements.txt: pyTelegramBotAPI, requests, streamlit, replicate, pandas
 
 # --- 1. ПЕРВИЧНАЯ НАСТРОЙКА ---
-st.set_page_config(page_title="AI Video Studio 2026", layout="wide")
+st.set_page_config(page_title="Media AI Master: Luma Edition", layout="wide")
 
 if 'bot_history' not in st.session_state:
     st.session_state['bot_history'] = []
 
-# Очередь для логов между потоком бота и Streamlit
 SHARED_LOGS = []
 
 try:
@@ -26,7 +25,7 @@ try:
     REPLICATE_TOKEN = st.secrets["REPLICATE_API_TOKEN"]
     os.environ["REPLICATE_API_TOKEN"] = REPLICATE_TOKEN
 except Exception as e:
-    st.error("Ошибка Secrets! Проверьте токены в панели Streamlit Cloud.")
+    st.error("Настройте SECRETS (TELEGRAM_TOKEN, PEXELS_API_KEY, REPLICATE_API_TOKEN)!")
     st.stop()
 
 bot = telebot.TeleBot(TOKEN)
@@ -38,7 +37,7 @@ class VideoAI:
     def get_stock(query):
         """Поиск видео на Pexels."""
         headers = {"Authorization": PEXELS_KEY}
-        url = f"https://api.pexels.com/videos/search?query={query}&per_page=10"
+        url = f"https://api.pexels.com/videos/search?query={query}&per_page=5"
         try:
             r = requests.get(url, headers=headers, timeout=10).json()
             vids = r.get('videos', [])
@@ -48,23 +47,19 @@ class VideoAI:
         except: return None
 
     @staticmethod
-    def generate_ai(prompt):
-        """Генерация через стабильную модель AnimateDiff (Replicate)."""
+    def luma_reframe(video_url, prompt="Focus on the main subject"):
+        """Использование Luma Reframe API для изменения формата видео."""
         try:
-            # Используем AnimateDiff — она сейчас самая надежная для текстовых промптов
             output = replicate.run(
-                "lucataco/animate-diff:be11f4a83af975733448351da254923f773400a4e17743f0290130638e967b0b",
+                "luma/reframe-video",
                 input={
                     "prompt": prompt,
-                    "n_prompt": "bad quality, low resolution, blurry",
-                    "steps": 25,
-                    "guidance_scale": 7.5
+                    "video_url": video_url,
+                    "aspect_ratio": "9:16" # Делаем вертикальным для Reels/Shorts
                 }
             )
-            # Модель возвращает список ссылок, берем первую
-            if isinstance(output, list) and len(output) > 0:
-                return output[0]
-            return output # Если вернулась одна строка
+            # У Luma вывод — это объект с атрибутом .url
+            return output.url if hasattr(output, 'url') else str(output)
         except Exception as e:
             return f"Error: {str(e)}"
 
@@ -73,22 +68,22 @@ class VideoAI:
 @bot.message_handler(commands=['start'])
 def start(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("🖼 Найти", "🧠 Создать (ИИ)")
-    bot.send_message(message.chat.id, "🤖 **Media AI Studio v6.1**\nОбновил нейросеть! Теперь ошибки 422 быть не должно.", reply_markup=markup)
+    markup.add("🎬 Найти и Рефреймить (Luma)", "🖼 Просто Сток")
+    bot.send_message(message.chat.id, "🤖 **Media Master + Luma AI**\nЯ могу найти видео и переделать его под вертикальный формат 9:16!", reply_markup=markup)
 
 @bot.message_handler(func=lambda m: True)
 def handle_text(message):
     query = message.text
-    if query in ["🖼 Найти", "🧠 Создать (ИИ)"]:
-        bot.send_message(message.chat.id, "Напиши тему на английском (напр. *Forest fire at night*):")
+    if query in ["🎬 Найти и Рефреймить (Luma)", "🖼 Просто Сток"]:
+        bot.send_message(message.chat.id, "Напиши тему видео (на англ.):")
         return
 
     markup = types.InlineKeyboardMarkup()
     markup.add(
-        types.InlineKeyboardButton("📦 Сток Pexels", callback_data=f"f:{query}"),
-        types.InlineKeyboardButton("🤖 Нейросеть AI", callback_data=f"g:{query}")
+        types.InlineKeyboardButton("✨ Luma Reframe (9:16)", callback_data=f"luma:{query}"),
+        types.InlineKeyboardButton("📦 Обычный Сток", callback_data=f"stock:{query}")
     )
-    bot.send_message(message.chat.id, f"🎯 Твой запрос: **{query}**", parse_mode="Markdown", reply_markup=markup)
+    bot.send_message(message.chat.id, f"🎯 Запрос: **{query}**\nВыбери режим:", parse_mode="Markdown", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
@@ -96,30 +91,36 @@ def callback_handler(call):
     chat_id = call.message.chat.id
     bot.answer_callback_query(call.id)
 
-    if action == "f":
-        bot.send_message(chat_id, "🔎 Ищу на стоках...")
+    if action == "stock":
+        bot.send_message(chat_id, "🔎 Ищу видео...")
         res = VideoAI.get_stock(query)
         if res:
-            bot.send_video(chat_id, res, caption=f"✅ Найдено: {query}")
+            bot.send_video(chat_id, res, caption=f"✅ Сток: {query}")
             SHARED_LOGS.append({"Запрос": query, "Тип": "Сток", "Статус": "Успех"})
         else:
-            bot.send_message(chat_id, "❌ Ничего не найдено.")
+            bot.send_message(chat_id, "❌ Не найдено.")
 
-    elif action == "g":
-        status_msg = bot.send_message(chat_id, "🚀 Нейросеть AnimateDiff запущена...\nЭто займет около 40-80 секунд.")
-        bot.send_chat_action(chat_id, 'record_video')
+    elif action == "luma":
+        status_msg = bot.send_message(chat_id, "⚙️ Сначала ищу видео, затем отправляю в Luma AI...")
         
-        result = VideoAI.generate_ai(query)
+        # 1. Находим видео-источник
+        source_video = VideoAI.get_stock(query)
         
-        if result and not str(result).startswith("Error"):
-            try:
-                bot.send_video(chat_id, result, caption=f"🔥 Готово! Модель: AnimateDiff\nЗапрос: {query}")
-                SHARED_LOGS.append({"Запрос": query, "Тип": "ИИ", "Статус": "Успех"})
-            except:
-                bot.send_message(chat_id, f"🔗 Видео готово, но файл слишком большой. Вот ссылка: {result}")
+        if source_video:
+            bot.edit_message_text("🧬 Видео найдено. Luma AI начинает рефрейминг в 9:16...", chat_id, status_msg.message_id)
+            bot.send_chat_action(chat_id, 'record_video')
+            
+            # 2. Отправляем в Luma
+            result_url = VideoAI.luma_reframe(source_video, f"Follow the subject in {query}")
+            
+            if result_url and "http" in result_url:
+                bot.send_video(chat_id, result_url, caption=f"🔥 Luma Reframe Готов!\nФормат: 9:16 (Vertical)\nТема: {query}")
+                SHARED_LOGS.append({"Запрос": query, "Тип": "Luma", "Статус": "Успех"})
+            else:
+                bot.send_message(chat_id, f"⚠️ Ошибка Luma: {result_url}")
+                SHARED_LOGS.append({"Запрос": query, "Тип": "Luma", "Статус": "Ошибка"})
         else:
-            bot.edit_message_text(f"⚠️ Ошибка API: {result}", chat_id, status_msg.message_id)
-            SHARED_LOGS.append({"Запрос": query, "Тип": "ИИ", "Статус": f"Ошибка: {result}"})
+            bot.send_message(chat_id, "❌ Не удалось найти исходное видео для обработки.")
 
 # --- 4. ЗАПУСК БОТА ---
 
@@ -129,34 +130,27 @@ def run_bot_forever():
 
 # --- 5. ИНТЕРФЕЙС STREAMLIT ---
 
-st.title("🖥 Media AI Master Dashboard")
+st.title("🖥 Media Master Dashboard: Luma & Pexels")
 
 if "bot_thread_active" not in st.session_state:
     thread = Thread(target=run_bot_forever, daemon=True)
     thread.start()
     st.session_state.bot_thread_active = True
 
-# Перенос логов
 if SHARED_LOGS:
     for log in SHARED_LOGS:
         st.session_state.bot_history.append(log)
     SHARED_LOGS.clear()
 
-col1, col2 = st.columns([2, 1])
+st.subheader("📊 История обработки")
+if st.session_state.bot_history:
+    df = pd.DataFrame(st.session_state.bot_history).iloc[::-1]
+    st.dataframe(df, use_container_width=True)
 
-with col1:
-    st.subheader("📊 Логи запросов")
-    if st.session_state.bot_history:
-        df = pd.DataFrame(st.session_state.bot_history).iloc[::-1]
-        st.dataframe(df, use_container_width=True)
-    else:
-        st.info("Активности пока нет.")
+st.sidebar.subheader("Статус API")
+st.sidebar.write("Luma AI (Replicate): ✅")
+st.sidebar.write("Pexels: ✅")
 
-with col2:
-    st.subheader("🛠 Контроль")
-    st.success("Бот Онлайн ✅")
-    if st.button("Очистить историю"):
-        st.session_state.bot_history = []
-        st.rerun()
-
-st.caption("v6.1: Исправлена ошибка 422. Переход на модель AnimateDiff.")
+if st.sidebar.button("Очистить историю"):
+    st.session_state.bot_history = []
+    st.rerun()

@@ -5,142 +5,116 @@ import requests
 import random
 from threading import Thread
 import time
-import pandas as pd
 
-# Библиотеки: pyTelegramBotAPI, requests, streamlit, pandas
+# Список для requirements.txt: pyTelegramBotAPI, requests, streamlit
 
 # --- CONFIG ---
 try:
     TOKEN = st.secrets["TELEGRAM_TOKEN"]
     PEXELS_KEY = st.secrets["PEXELS_API_KEY"]
 except:
-    st.error("Настройте SECRETS (TELEGRAM_TOKEN и PEXELS_API_KEY)!")
+    st.error("Настройте SECRETS (TELEGRAM_TOKEN, PEXELS_API_KEY)!")
     st.stop()
 
 bot = telebot.TeleBot(TOKEN)
 
-if 'history' not in st.session_state:
-    st.session_state.history = []
+# --- MESSENGER-X STYLE LOGIC (Character AI) ---
 
-# --- PEXELS LOGIC ---
-
-def fetch_resource(query, resource_type="photos"):
-    """Загрузчик контента с обработкой ошибок."""
-    page = random.randint(1, 20)
-    base_url = "https://api.pexels.com/v1/search" if resource_type == "photos" else "https://api.pexels.com/videos/search"
-    url = f"{base_url}?query={query}&per_page=15&page={page}"
+class MediaAssistant:
+    """Класс-ассистент, имитирующий логику MessengerX."""
     
-    headers = {"Authorization": PEXELS_KEY}
-    try:
-        resp = requests.get(url, headers=headers, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            items = data.get('photos') if resource_type == "photos" else data.get('videos')
-            if items:
-                return random.choice(items)
-    except Exception as e:
-        st.error(f"Ошибка API: {e}")
-    return None
+    def __init__(self):
+        self.name = "MediaExpert AI"
+        self.role = "Профессиональный бильд-редактор"
+
+    def get_response(self, text):
+        """Логика 'мышления' бота."""
+        text = text.lower()
+        if "привет" in text:
+            return f"Здравствуйте! Я {self.name}. Помогу найти лучшие кадры для вашего проекта. Что ищем?"
+        elif "кто ты" in text:
+            return f"Я — {self.role}. Моя база включает Pexels и другие библиотеки."
+        else:
+            return None
 
 # --- BOT LOGIC ---
 
+assistant = MediaAssistant()
+
 @bot.message_handler(commands=['start'])
-def send_welcome(message):
+def start(message):
+    welcome = assistant.get_response("привет")
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("🖼 Поиск")
-    
-    msg = "🎮 **Media Hunter v3.0**\nНапиши любое слово (на англ.), а потом выбери формат!"
-    bot.send_message(message.chat.id, msg, parse_mode="Markdown", reply_markup=markup)
+    markup.add("🖼 Найти Фото", "📹 Найти Видео")
+    bot.send_message(message.chat.id, welcome, reply_markup=markup)
 
 @bot.message_handler(func=lambda m: True)
-def handle_text(message):
-    query = message.text
-    if query == "🖼 Поиск":
-        bot.reply_to(message, "Просто напиши тему поиска (например: Cars)")
+def handle_interaction(message):
+    chat_id = message.chat.id
+    text = message.text
+
+    # Проверяем, не является ли сообщение системным вопросом к ИИ
+    ai_reply = assistant.get_response(text)
+    if ai_reply and text not in ["🖼 Найти Фото", "📹 Найти Видео"]:
+        bot.send_message(chat_id, ai_reply)
         return
 
-    markup = types.InlineKeyboardMarkup()
-    markup.add(
-        types.InlineKeyboardButton("🖼 Картинка", callback_data=f"img:{query}"),
-        types.InlineKeyboardButton("🎞 Видео", callback_data=f"vid:{query}")
-    )
-    bot.send_message(message.chat.id, f"🎯 Запрос: **{query}**", 
-                     parse_mode="Markdown", reply_markup=markup)
+    if text == "🖼 Найти Фото":
+        msg = bot.send_message(chat_id, "Введите тему для фото (на англ.):")
+        bot.register_next_step_handler(msg, process_photo_search)
+    elif text == "📹 Найти Видео":
+        msg = bot.send_message(chat_id, "Введите тему для видео (на англ.):")
+        bot.register_next_step_handler(msg, process_video_search)
+    else:
+        bot.reply_to(message, "Я пока не понимаю эту команду. Попробуйте нажать кнопку или написать 'Привет'.")
 
-@bot.callback_query_handler(func=lambda call: True)
-def process_callback(call):
-    action, query = call.data.split(":", 1)
-    chat_id = call.message.chat.id
+def process_photo_search(message):
+    query = message.text
+    headers = {"Authorization": PEXELS_KEY}
+    url = f"https://api.pexels.com/v1/search?query={query}&per_page=1&page={random.randint(1,20)}"
     
-    # Визуальный отклик в ТГ, что работа началась
-    bot.answer_callback_query(call.id, "🎬 Загружаю контент...")
-    bot.send_chat_action(chat_id, 'upload_video' if action == "vid" else 'upload_photo')
+    try:
+        res = requests.get(url, headers=headers).json()
+        if res.get('photos'):
+            img = res['photos'][0]['src']['large2x']
+            bot.send_photo(message.chat.id, img, caption=f"✨ Специально для вас по запросу: {query}")
+        else:
+            bot.send_message(message.chat.id, "Ничего не найдено. Попробуйте другое слово.")
+    except:
+        bot.send_message(message.chat.id, "Ошибка связи с базой данных.")
 
-    if action == "img":
-        item = fetch_resource(query, "photos")
-        if item:
-            bot.send_photo(chat_id, item['src']['large2x'], caption=f"✅ {query}")
-            st.session_state.history.append({"Тип": "Фото", "Запрос": query, "Статус": "Успех"})
+def process_video_search(message):
+    query = message.text
+    headers = {"Authorization": PEXELS_KEY}
+    url = f"https://api.pexels.com/videos/search?query={query}&per_page=1&page={random.randint(1,15)}"
     
-    elif action == "vid":
-        item = fetch_resource(query, "videos")
-        if item:
-            # Ищем видео среднего размера (HD), чтобы Telegram его пропустил по ссылке
-            # Telegram Cloud не любит файлы > 20MB при отправке по URL
-            files = item['video_files']
-            # Выбираем видео с шириной около 1280 (HD)
-            target_video = None
-            for f in files:
-                if f['width'] and 1280 >= f['width'] >= 720:
-                    target_video = f
-                    break
-            
-            # Если HD не нашли, берем любое самое маленькое, чтобы точно отправилось
-            if not target_video:
-                target_video = min(files, key=lambda x: x['width'] if x['width'] else 9999)
-
-            try:
-                bot.send_video(
-                    chat_id, 
-                    target_video['link'], 
-                    caption=f"📹 Видео: {query}\nКачество: {target_video['width']}p",
-                    timeout=20, # Таймаут 20 секунд, чтобы не висеть вечно
-                    supports_streaming=True
-                )
-                st.session_state.history.append({"Тип": "Видео", "Запрос": query, "Статус": "Успех"})
-            except Exception as e:
-                bot.send_message(chat_id, "⚠️ Видео слишком тяжелое для Telegram. Попробуй еще раз!")
-                st.session_state.history.append({"Тип": "Видео", "Запрос": query, "Статус": f"Ошибка: {str(e)}"})
-
-# --- BACKGROUND RUN ---
-def start_polling():
-    bot.remove_webhook()
-    bot.polling(none_stop=True, interval=1)
+    try:
+        res = requests.get(url, headers=headers).json()
+        if res.get('videos'):
+            video = res['videos'][0]['video_files'][0]['link']
+            bot.send_video(message.chat.id, video, caption=f"🎬 Видео-результат: {query}")
+        else:
+            bot.send_message(message.chat.id, "Видео не найдено.")
+    except:
+        bot.send_message(message.chat.id, "Ошибка загрузки видео.")
 
 # --- STREAMLIT DASHBOARD ---
-st.set_page_config(page_title="Admin Console", layout="wide")
+
+def run_bot():
+    bot.remove_webhook()
+    bot.polling(none_stop=True)
+
+st.set_page_config(page_title="MessengerX Concept", layout="wide")
+st.title("🤖 MessengerX Style Interface")
 
 if "active" not in st.session_state:
-    t = Thread(target=start_polling)
-    t.daemon = True
-    t.start()
+    Thread(target=run_bot, daemon=True).start()
     st.session_state.active = True
 
-st.title("🖥 Media Grabber Admin Panel")
+st.success("Интеллектуальный ассистент активен.")
+st.write(f"Бот имитирует роль: **{assistant.role}**")
 
-tab1, tab2 = st.tabs(["📊 Логи", "⚙️ Статус"])
-
-with tab1:
-    if st.session_state.history:
-        df = pd.DataFrame(st.session_state.history).iloc[::-1]
-        st.dataframe(df, use_container_width=True)
-    else:
-        st.info("История пуста")
-
-with tab2:
-    st.write(f"Бот запущен в: {time.strftime('%H:%M:%S')}")
-    if st.button("Перезагрузить интерфейс"):
-        st.rerun()
-
+# Статистика сессии
 st.divider()
-st.caption("v3.1: Исправлена проблема зависания видео")
+st.subheader("Мониторинг диалогов")
+st.info("Здесь будут отображаться логи общения в стиле MessengerX.")
